@@ -53,6 +53,57 @@ def test_setup_status_reports_login_and_models_from_the_cli(profile, tmp_path):
     assert all(m["upstream_requests"] == 0 for m in models)
 
 
+def test_a_model_the_pins_never_saw_arrives_from_the_picker(profile, tmp_path):
+    """The point of the whole path: shipping a new Claude must not require a catalog commit.
+
+    Both routes below are invented, so neither can be in the pinned catalog — they stand in for
+    whatever Anthropic releases next. The CLI states the window by resolving a route to `<id>[1m]`
+    when it offers that model at 1M, so nothing here is guessed.
+    """
+    state = {"auth": {"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"},
+             "account": {"subscriptionType": "Claude Max"},
+             "models": [
+                 {"value": "zephyr[1m]", "resolvedModel": "claude-zephyr-9[1m]", "displayName": "Zephyr",
+                  "description": "Zephyr 9 · Brand new", "supportsAdaptiveThinking": True},
+                 {"value": "quill", "resolvedModel": "claude-quill-2", "displayName": "Quill",
+                  "description": "Quill 2 · Short context"},
+             ]}
+    command, env = _cli(tmp_path, state)
+    models = profile.discover_models(command=command, env=env)
+
+    assert [m["id"] for m in models] == ["claude-zephyr-9[1m]", "claude-quill-2"]
+    assert profile.get_model_context_length("claude-zephyr-9[1m]") == 1_000_000
+    # Not blanket-promoted to 1M: a route the CLI offers only at the short window keeps it.
+    assert profile.get_model_context_length("claude-quill-2") == 200_000
+    # The family shortcut the account can actually type resolves to the new route too.
+    assert profile.get_model_context_length("zephyr") == 1_000_000
+    # A pinned route the picker has stopped listing survives the merge rather than being dropped.
+    assert profile.get_model_context_length("claude-opus-4-8[1m]") == 1_000_000
+
+
+def test_thinking_support_is_read_from_the_picker_not_the_pin(profile, tmp_path):
+    """`supportsAdaptiveThinking` is stated per row; a new model that rejects adaptive thinking
+    must be recorded as such without anyone editing the hardcoded quirk set."""
+    import importlib
+
+    state = {"auth": {"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"},
+             "account": {"subscriptionType": "Claude Max"},
+             "models": [
+                 {"value": "zephyr[1m]", "resolvedModel": "claude-zephyr-9[1m]", "displayName": "Zephyr",
+                  "description": "Zephyr 9", "supportsAdaptiveThinking": True},
+                 {"value": "quill", "resolvedModel": "claude-quill-2", "displayName": "Quill",
+                  "description": "Quill 2"},
+             ]}
+    command, env = _cli(tmp_path, state)
+    assert profile.discover_models(command=command, env=env)
+
+    catalog = importlib.import_module(type(profile).__module__ + ".model_catalog")
+    assert catalog.supports_adaptive_thinking("claude-zephyr-9[1m]") is True
+    assert catalog.supports_adaptive_thinking("claude-quill-2") is False
+    # Absent from the picker entirely, the pinned quirk still stands.
+    assert catalog.supports_adaptive_thinking("claude-haiku-4-5-20251001") is False
+
+
 def test_logged_out_or_missing_cli_degrades_to_pinned_catalog(profile, tmp_path):
     command, env = _cli(tmp_path, {"auth": {"loggedIn": False, "authMethod": "none"}, "account": {}, "models": []})
     status = profile.setup_status(command=command, env=env)

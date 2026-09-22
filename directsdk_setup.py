@@ -13,10 +13,10 @@ import tempfile
 
 try:
     from .admission import Admission
-    from .model_catalog import CONTEXT_WINDOWS, native_model
+    from .model_catalog import DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, learn, native_model
 except ImportError:
     from admission import Admission
-    from model_catalog import CONTEXT_WINDOWS, native_model
+    from model_catalog import DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, learn, native_model
 
 INSTALL_HINT = ("Claude Code is not installed (no `claude` on PATH). Install it with "
                 "`npm install -g @anthropic-ai/claude-code` or set CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND to the binary.")
@@ -102,10 +102,38 @@ def discover_models(command=None, env=None, timeout=40):
     # says so at request time, so apply the documented plan rule here.
     plan = str((response.get("response", {}).get("account") or {}).get("subscriptionType") or "").lower()
     credit_billed_on_plan = {"claude-fable-5-1"} if plan and "max" not in plan else set()
+
+    # Read the picker's own metadata rather than intersecting it with the pins: a model released
+    # after this plugin shipped is exactly the one absent from the pins, and dropping it here is
+    # why a new model used to need a catalog commit before it could be selected. The window is
+    # not guessed — the CLI states it by resolving a route to `<id>[1m]` when that model is
+    # offered at 1M, and reports thinking support per row.
+    observed, aliases = {}, {}
+    for row in native:
+        resolved = str(row.get("resolvedModel") or row.get("value") or "")
+        if not resolved:
+            continue
+        base = resolved.removesuffix("[1m]")
+        facts = observed.setdefault(base, {"context_window": DEFAULT_CONTEXT_WINDOW,
+                                           "supports_adaptive_thinking": False})
+        if resolved.endswith("[1m]"):
+            facts["context_window"] = LONG_CONTEXT_WINDOW
+        if row.get("supportsAdaptiveThinking"):
+            facts["supports_adaptive_thinking"] = True
+        # `value` carries the family shortcut the account can type (`opus`, `sonnet`); the
+        # "Default (recommended)" row names no model and a self-referential value is an id.
+        shortcut = str(row.get("value") or "").removesuffix("[1m]")
+        if shortcut and shortcut != "default" and shortcut != base:
+            aliases[shortcut] = base
+    if not observed:
+        return None
+    # Before native_model(), which reads the pins this teaches.
+    learn(observed, aliases)
+
     routes = {}
     for row in native:
         base = str(row.get("resolvedModel") or row.get("value") or "").removesuffix("[1m]")
-        if base not in CONTEXT_WINDOWS:
+        if base not in observed:
             continue
         route = native_model(base)
         # Model names, not the native "Default (recommended)" alias row.
