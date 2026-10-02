@@ -99,9 +99,55 @@ def test_thinking_support_is_read_from_the_picker_not_the_pin(profile, tmp_path)
 
     catalog = importlib.import_module(type(profile).__module__ + ".model_catalog")
     assert catalog.supports_adaptive_thinking("claude-zephyr-9[1m]") is True
-    assert catalog.supports_adaptive_thinking("claude-quill-2") is False
+    # The Quill row omits `supportsAdaptiveThinking` entirely, which states nothing — and silence
+    # must not be read as False. Only a row that says so disables adaptive thinking; otherwise a
+    # future model is downgraded by a field the CLI simply did not send, which is exactly the
+    # asymmetry that downgraded 1M windows. Known quirks stay covered by the pin below.
+    assert catalog.supports_adaptive_thinking("claude-quill-2") is True
     # Absent from the picker entirely, the pinned quirk still stands.
     assert catalog.supports_adaptive_thinking("claude-haiku-4-5-20251001") is False
+
+
+def test_a_bare_alias_row_never_downgrades_a_pinned_long_window(profile, tmp_path):
+    """Silence is not evidence of a short window, and reading it as one loses 800K tokens.
+
+    These are the shapes Claude Code 2.1.287 actually emits. From 2.1.284 the current generation
+    is announced as a bare family alias -- `value: "opus"`, `resolvedModel: "claude-opus-5-5"`,
+    no `[1m]` anywhere -- while the suffix survives only on secondary full-id rows, and there on
+    `value` with `resolvedModel` left bare (Fable). Defaulting an unstated window to 200K
+    therefore downgraded precisely the newest 1M models, silently and with no error on either
+    side: Opus 5.5 and Sonnet 5.5 both, the day each shipped.
+    """
+    state = {"auth": {"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"},
+             "account": {"subscriptionType": "Claude Max"},
+             "models": [
+                 # Pinned at 1M, announced bare. The pin must survive the merge.
+                 {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus",
+                  "description": "Opus 5.5 · Best for everyday", "supportsAdaptiveThinking": True},
+                 # The suffix rides `value` while `resolvedModel` stays bare: still 1M.
+                 {"value": "claude-fable-5-1[1m]", "resolvedModel": "claude-fable-5-1",
+                  "displayName": "Fable", "description": "Fable 5.1 · Hardest tasks",
+                  "supportsAdaptiveThinking": True},
+                 # Invented, unpinned, announced bare: genuinely unknown, so it must not be
+                 # promoted to 1M either -- it runs at the gateway default and says so.
+                 {"value": "sonnet", "resolvedModel": "claude-marlow-7", "displayName": "Marlow",
+                  "description": "Marlow 7 · Brand new", "supportsAdaptiveThinking": True},
+             ]}
+    command, env = _cli(tmp_path, state)
+    models = profile.discover_models(command=command, env=env)
+    by_id = {m["id"]: m for m in models}
+
+    # The regression: a bare alias row left these at 200K before.
+    assert "claude-opus-5-5[1m]" in by_id
+    assert profile.get_model_context_length("claude-opus-5-5[1m]") == 1_000_000
+    assert "claude-fable-5-1[1m]" in by_id
+    assert profile.get_model_context_length("claude-fable-5-1[1m]") == 1_000_000
+    # Unknown stays unknown: routed bare at the gateway default, and flagged rather than hidden.
+    assert "claude-marlow-7" in by_id
+    assert by_id["claude-marlow-7"]["note"] == "unpinned"
+    assert profile.get_model_context_length("claude-marlow-7") == 200_000
+    # Discovery costs nothing upstream.
+    assert all(m["upstream_requests"] == 0 for m in models)
 
 
 def test_logged_out_or_missing_cli_degrades_to_pinned_catalog(profile, tmp_path):

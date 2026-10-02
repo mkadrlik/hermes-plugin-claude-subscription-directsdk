@@ -13,10 +13,12 @@ import tempfile
 
 try:
     from .admission import Admission
-    from .model_catalog import DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, learn, native_model
+    from .model_catalog import (DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, MODEL_METADATA,
+                                learn, native_model)
 except ImportError:
     from admission import Admission
-    from model_catalog import DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, learn, native_model
+    from model_catalog import (DEFAULT_CONTEXT_WINDOW, LONG_CONTEXT_WINDOW, MODEL_METADATA,
+                               learn, native_model)
 
 INSTALL_HINT = ("Claude Code is not installed (no `claude` on PATH). Install it with "
                 "`npm install -g @anthropic-ai/claude-code` or set CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND to the binary.")
@@ -114,12 +116,22 @@ def discover_models(command=None, env=None, timeout=40):
         if not resolved:
             continue
         base = resolved.removesuffix("[1m]")
-        facts = observed.setdefault(base, {"context_window": DEFAULT_CONTEXT_WINDOW,
-                                           "supports_adaptive_thinking": False})
-        if resolved.endswith("[1m]"):
+        facts = observed.setdefault(base, {"context_window": None,
+                                           "supports_adaptive_thinking": None})
+        # `[1m]` anywhere in the row is positive evidence of the long window; its ABSENCE is no
+        # evidence at all. The CLI has no way to state "this route is only 200K", so reading
+        # silence as the short window is a guess wearing a derivation's clothes. From 2.1.284
+        # the current generation is announced as bare family aliases (`opus`, `sonnet`) with the
+        # suffix left on secondary full-id rows only, so that guess downgraded every newly
+        # released 1M model — Opus 5.5 and Sonnet 5.5 both, the day they shipped.
+        # Read both fields: the suffix rides `value` while `resolvedModel` stays bare (Fable).
+        if resolved.endswith("[1m]") or str(row.get("value") or "").endswith("[1m]"):
             facts["context_window"] = LONG_CONTEXT_WINDOW
+        # Same asymmetry: a row that omits the key says nothing, and must not be read as False.
         if row.get("supportsAdaptiveThinking"):
             facts["supports_adaptive_thinking"] = True
+        elif "supportsAdaptiveThinking" in row and facts["supports_adaptive_thinking"] is None:
+            facts["supports_adaptive_thinking"] = False
         # `value` carries the family shortcut the account can type (`opus`, `sonnet`); the
         # "Default (recommended)" row names no model and a self-referential value is an id.
         shortcut = str(row.get("value") or "").removesuffix("[1m]")
@@ -138,7 +150,11 @@ def discover_models(command=None, env=None, timeout=40):
         route = native_model(base)
         # Model names, not the native "Default (recommended)" alias row.
         label = str(row.get("description") or "").split("·")[0].strip() or route
-        entry = routes.setdefault(route, {"id": route, "label": label, "note": "", "upstream_requests": upstream})
+        # An unknown window is surfaced, never hidden: the route still runs natively inside the
+        # 200K gateway default, and the note is what lets a human (or claude-model-drift) spot a
+        # model whose real window this build cannot state. Loudly wrong beats silently wrong.
+        note = "" if route in MODEL_METADATA else "unpinned"
+        entry = routes.setdefault(route, {"id": route, "label": label, "note": note, "upstream_requests": upstream})
         if "usage credit" in str(row.get("description") or "").lower() or base in credit_billed_on_plan:
             entry["note"] = "usage credits"
     return list(routes.values()) or None

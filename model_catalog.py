@@ -66,13 +66,20 @@ def learn(models, aliases=()):
     dict. The picker wins for the routes it lists and says nothing about the rest, so a pinned
     route it has stopped offering (Opus 4.8) survives the merge.
 
-    ``models`` maps a native base id to ``{context_window, supports_adaptive_thinking}``.
+    ``models`` maps a native base id to ``{context_window, supports_adaptive_thinking}``, either
+    of which may be ``None`` for "the picker did not say". Only a stated fact moves a pin: the
+    CLI can announce a route at 1M, but it has no way to announce one as *only* 200K, so an
+    unknown window must leave the pin alone. Overwriting it with a default is how a derived
+    catalog silently downgrades a 1M model to a fifth of its window with no error anywhere.
     """
     for base, facts in models.items():
-        CONTEXT_WINDOWS[base] = facts['context_window']
-        if facts['supports_adaptive_thinking']:
+        window = facts.get('context_window')
+        if window:
+            CONTEXT_WINDOWS[base] = window
+        adaptive = facts.get('supports_adaptive_thinking')
+        if adaptive is True:
             NO_ADAPTIVE_THINKING.discard(base)
-        else:
+        elif adaptive is False:
             NO_ADAPTIVE_THINKING.add(base)
     ALIASES.update(aliases)
     MODEL_METADATA.clear()

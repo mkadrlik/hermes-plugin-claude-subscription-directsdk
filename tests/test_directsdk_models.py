@@ -27,7 +27,10 @@ def test_every_catalog_route_reports_a_usable_window(profile):
         canonical = profile.model_metadata[model]['canonical_model']
         assert canonical.startswith('claude-')
         assert profile.get_model_context_length(canonical) == window
-    assert profile.get_model_context_length('unqualified-future-model') is None
+    # A plain id always answers: unpinned means the 200K gateway default, never None. Returning
+    # None hands core a family-substring guess (`claude-opus-5` matches `claude-opus-5-5` -> 1M)
+    # and the CLI then rejects the oversized request. `[1m]` still answers None when unpinned.
+    assert profile.get_model_context_length('unqualified-future-model') == 200_000
 
 
 def test_aux_model_and_aliases_stay_inside_the_catalog(profile):

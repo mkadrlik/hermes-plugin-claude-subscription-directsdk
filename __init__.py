@@ -7,10 +7,10 @@ from providers.base import ProviderProfile
 
 # Dual import: the Hermes loader imports this directory as a package; the flat test path does not.
 try:
-    from .model_catalog import ALIASES, MODEL_METADATA, native_model
+    from .model_catalog import ALIASES, DEFAULT_CONTEXT_WINDOW, MODEL_METADATA, native_model
     from .directsdk_setup import INSTALL_HINT, _resolve
 except ImportError:
-    from model_catalog import ALIASES, MODEL_METADATA, native_model
+    from model_catalog import ALIASES, DEFAULT_CONTEXT_WINDOW, MODEL_METADATA, native_model
     from directsdk_setup import INSTALL_HINT, _resolve
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,16 @@ class ClaudeOAuthDirectSDKProfile(ProviderProfile):
     model_metadata = MODEL_METADATA
 
     def get_model_context_length(self, model):
-        return self.model_metadata.get(native_model(model), {}).get('context_window')
+        # Never None for a plain id: the pinned window, else the gateway default. A route whose
+        # window the picker never stated still runs natively inside 200K, and answering None
+        # hands core a family-substring guess instead (`claude-opus-5` matching `claude-opus-5-5`
+        # -> 1M), which packs a 1M conversation the CLI then rejects at 200K. An explicit `[1m]`
+        # request still answers None when unpinned, because that suffix promises a window this
+        # build cannot vouch for.
+        window = self.model_metadata.get(native_model(model), {}).get('context_window')
+        if window is None and isinstance(model, str) and not model.endswith('[1m]'):
+            return DEFAULT_CONTEXT_WINDOW
+        return window
 
     def get_usage_cost(self, model, usage):
         from decimal import Decimal, InvalidOperation
